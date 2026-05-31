@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 
 # ── Version & Auto-Update ──────────────────────────────────────────────────────
-APP_VERSION   = "1.2.0"
+APP_VERSION   = "1.3.0"
 GITHUB_USER   = "Aboss2130"
 GITHUB_REPO   = "popremind"
 RAW_URL       = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/reminder.py"
@@ -60,7 +60,14 @@ from PySide6.QtGui import (
     QIcon, QColor, QFont, QPixmap, QPainter, QBrush,
     QPen, QAction, QGuiApplication
 )
-from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+# pygame used for audio — no clipping on playback start
+try:
+    import pygame as _pygame
+    _pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=512)
+    _pygame.mixer.init()
+    _PYGAME_OK = True
+except Exception:
+    _PYGAME_OK = False
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 APP_NAME  = "PopRemind"
@@ -162,25 +169,39 @@ def make_tray_icon(accent="#6C63FF"):
 
 # ── Sound ──────────────────────────────────────────────────────────────────────
 class SoundPlayer:
-    _instances = []
+    """Plays audio via pygame mixer — loads fully before playing so no clipping."""
     @staticmethod
     def play(path: str, volume: int):
         if not path or not Path(path).exists():
             return
-        player = QMediaPlayer()
-        audio   = QAudioOutput()
-        player.setAudioOutput(audio)
-        audio.setVolume(volume / 100.0)
-        player.setSource(QUrl.fromLocalFile(path))
-        SoundPlayer._instances.append((player, audio))
-        def cleanup():
-            pair = (player, audio)
-            if pair in SoundPlayer._instances:
-                SoundPlayer._instances.remove(pair)
-        player.playbackStateChanged.connect(
-            lambda s: cleanup() if s == QMediaPlayer.StoppedState else None
-        )
-        player.play()
+        if _PYGAME_OK:
+            def _play():
+                try:
+                    _pygame.mixer.music.load(path)
+                    _pygame.mixer.music.set_volume(volume / 100.0)
+                    _pygame.mixer.music.play()
+                except Exception as e:
+                    print("pygame play error:", e)
+            threading.Thread(target=_play, daemon=True).start()
+        else:
+            # Fallback: QMediaPlayer (may clip start)
+            from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+            from PySide6.QtCore import QUrl
+            player = QMediaPlayer()
+            audio  = QAudioOutput()
+            player.setAudioOutput(audio)
+            audio.setVolume(volume / 100.0)
+            player.setSource(QUrl.fromLocalFile(path))
+            SoundPlayer._instances.append((player, audio))
+            def cleanup():
+                pair = (player, audio)
+                if pair in SoundPlayer._instances:
+                    SoundPlayer._instances.remove(pair)
+            player.playbackStateChanged.connect(
+                lambda s: cleanup() if s == QMediaPlayer.StoppedState else None
+            )
+            player.play()
+    _instances = []
 
 # ── Popup ──────────────────────────────────────────────────────────────────────
 class PopupWindow(QWidget):
