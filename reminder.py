@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime, timedelta
 
 # ── Version & Auto-Update ──────────────────────────────────────────────────────
-APP_VERSION   = "1.3.0"
+APP_VERSION   = "1.4.0"
 GITHUB_USER   = "Aboss2130"
 GITHUB_REPO   = "popremind"
 RAW_URL       = f"https://raw.githubusercontent.com/{GITHUB_USER}/{GITHUB_REPO}/main/reminder.py"
@@ -60,11 +60,12 @@ from PySide6.QtGui import (
     QIcon, QColor, QFont, QPixmap, QPainter, QBrush,
     QPen, QAction, QGuiApplication
 )
-# pygame used for audio — no clipping on playback start
+# pygame used for audio — pre-loaded into memory to avoid clipping
 try:
     import pygame as _pygame
-    _pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=512)
+    _pygame.mixer.pre_init(frequency=44100, size=-16, channels=2, buffer=256)
     _pygame.mixer.init()
+    _pygame.mixer.set_num_channels(8)
     _PYGAME_OK = True
 except Exception:
     _PYGAME_OK = False
@@ -169,22 +170,40 @@ def make_tray_icon(accent="#6C63FF"):
 
 # ── Sound ──────────────────────────────────────────────────────────────────────
 class SoundPlayer:
-    """Plays audio via pygame mixer — loads fully before playing so no clipping."""
+    """
+    Pre-loads audio files into pygame Sound objects (not music stream).
+    Sound objects are fully buffered in memory — zero latency, no clipping.
+    Cache persists as long as the app runs so repeated plays are instant.
+    """
+    _cache: dict = {}   # path -> pygame.mixer.Sound
+
+    @staticmethod
+    def preload(path: str):
+        """Load a sound file into cache. Call when user picks a file."""
+        if not _PYGAME_OK or not path or not Path(path).exists():
+            return
+        if path not in SoundPlayer._cache:
+            try:
+                SoundPlayer._cache[path] = _pygame.mixer.Sound(path)
+            except Exception as e:
+                print("pygame preload error:", e)
+
     @staticmethod
     def play(path: str, volume: int):
         if not path or not Path(path).exists():
             return
         if _PYGAME_OK:
-            def _play():
-                try:
-                    _pygame.mixer.music.load(path)
-                    _pygame.mixer.music.set_volume(volume / 100.0)
-                    _pygame.mixer.music.play()
-                except Exception as e:
-                    print("pygame play error:", e)
-            threading.Thread(target=_play, daemon=True).start()
+            try:
+                # Preload if not already cached
+                if path not in SoundPlayer._cache:
+                    SoundPlayer._cache[path] = _pygame.mixer.Sound(path)
+                sound = SoundPlayer._cache[path]
+                sound.set_volume(volume / 100.0)
+                sound.play()
+            except Exception as e:
+                print("pygame play error:", e)
         else:
-            # Fallback: QMediaPlayer (may clip start)
+            # Fallback: QMediaPlayer
             from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
             from PySide6.QtCore import QUrl
             player = QMediaPlayer()
@@ -581,7 +600,10 @@ class ReminderRow(QFrame):
             self, "Select audio file", str(Path.home()),
             "Audio files (*.mp3 *.wav *.ogg *.flac);;All files (*)"
         )
-        if p: self.snd_path.setText(p); self.changed.emit()
+        if p:
+            self.snd_path.setText(p)
+            SoundPlayer.preload(p)
+            self.changed.emit()
 
     def _test_sound(self):
         p = self.snd_path.text()
@@ -619,6 +641,7 @@ class MainWindow(QMainWindow):
         self._setup_window()
         self._setup_tray()
         self._build_ui()
+        self._preload_all_sounds()
         self._start_all_timers()
         QTimer.singleShot(100, self.hide)
 
@@ -897,6 +920,7 @@ class MainWindow(QMainWindow):
         self._save()
         self._stop_all_timers()
         self._stop_dt_timers()
+        self._preload_all_sounds()
         self._start_all_timers()
         self._update_status_label()
         # Show save toast
@@ -908,6 +932,12 @@ class MainWindow(QMainWindow):
         self.status_lbl.setText(f"✓ {n} active reminder{'s' if n!=1 else ''} running")
 
     # ── timers ─────────────────────────────────────────────────────────────────
+    def _preload_all_sounds(self):
+        """Pre-cache every enabled reminder's sound file into pygame memory."""
+        for r in self.config["reminders"]:
+            if r.get("sound_enabled") and r.get("sound_path"):
+                SoundPlayer.preload(r["sound_path"])
+
     def _start_all_timers(self):
         now = datetime.now()
         for r in self.config["reminders"]:
